@@ -83,10 +83,9 @@ export default function AuthScreen({ onAuth }) {
 
         {/* Logo / Title */}
         <div style={{ textAlign: "center", marginBottom: 28 }}>
-          <img src="/apple-touch-icon.png" alt="Bodii Now"
-            style={{ width: 52, height: 52, borderRadius: 14, margin: "0 auto 12px", display: "block", objectFit: "cover" }} />
-          <div style={{ fontSize: 20, fontWeight: 700, color: T.text }}>Bodii Now</div>
-          <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>
+          <img src="/logo.png" alt="Bodii Now"
+            style={{ width: 180, height: "auto", margin: "0 auto 16px", display: "block", objectFit: "contain" }} />
+          <div style={{ fontSize: 12, color: T.textMuted }}>
             {mode === "login"    && "เข้าสู่ระบบเพื่อดูข้อมูลของคุณ"}
             {mode === "register" && "สร้างบัญชีใหม่ฟรี"}
             {mode === "reset"    && "รีเซ็ตรหัสผ่าน"}
