@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { supabase } from "./supabaseClient";
 import {
   LineChart, Line, BarChart, Bar, AreaChart, Area,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
@@ -35,6 +36,43 @@ function getInj()     { try { return JSON.parse(localStorage.getItem(k(INJ_STORE
 function setInj(arr)  { localStorage.setItem(k(INJ_STORE), JSON.stringify(arr)); }
 function getProfile() { try { return JSON.parse(localStorage.getItem(k(PROFILE_STORE)) || "null"); } catch { return null; } }
 function setProfile(p){ localStorage.setItem(k(PROFILE_STORE), JSON.stringify(p)); }
+
+// ─── Supabase Cloud Sync ─────────────────────────────────────
+const _ct = {};
+function debounceCloud(key, fn, ms = 1500) { clearTimeout(_ct[key]); _ct[key] = setTimeout(fn, ms); }
+
+async function cloudSaveDay(uid, dayKey, data) {
+  try { await supabase.from("daily_records").upsert({ user_id: uid, day_key: dayKey, data, updated_at: new Date().toISOString() }, { onConflict: "user_id,day_key" }); } catch(e) { console.warn("cloud save day:", e.message); }
+}
+async function cloudSaveProfile(uid, profile) {
+  try { await supabase.from("user_profiles").upsert({ user_id: uid, profile, updated_at: new Date().toISOString() }, { onConflict: "user_id" }); } catch(e) { console.warn("cloud save profile:", e.message); }
+}
+async function cloudSaveInj(uid, records) {
+  try { await supabase.from("injection_records").upsert({ user_id: uid, records, updated_at: new Date().toISOString() }, { onConflict: "user_id" }); } catch(e) { console.warn("cloud save inj:", e.message); }
+}
+async function cloudSaveWeekly(uid, notes) {
+  try { await supabase.from("weekly_notes").upsert({ user_id: uid, notes, updated_at: new Date().toISOString() }, { onConflict: "user_id" }); } catch(e) { console.warn("cloud save weekly:", e.message); }
+}
+async function cloudPullAll(uid) {
+  try {
+    const [days, prof, inj, wk] = await Promise.all([
+      supabase.from("daily_records").select("day_key, data").eq("user_id", uid),
+      supabase.from("user_profiles").select("profile").eq("user_id", uid).maybeSingle(),
+      supabase.from("injection_records").select("records").eq("user_id", uid).maybeSingle(),
+      supabase.from("weekly_notes").select("notes").eq("user_id", uid).maybeSingle(),
+    ]);
+    if (days.data?.length) localStorage.setItem(k(STORE), JSON.stringify(Object.fromEntries(days.data.map(r => [r.day_key, r.data]))));
+    if (prof.data?.profile) localStorage.setItem(k(PROFILE_STORE), JSON.stringify(prof.data.profile));
+    if (inj.data?.records) localStorage.setItem(k(INJ_STORE), JSON.stringify(inj.data.records));
+    if (wk.data?.notes) localStorage.setItem(k(WEEKLY_STORE), JSON.stringify(wk.data.notes));
+  } catch(e) { console.warn("Cloud pull failed, using local cache:", e.message); }
+}
+async function uploadPhoto(uid, dayKey, side, file) {
+  const path = `${uid}/${dayKey}/${side}`;
+  const { error } = await supabase.storage.from("progress-photos").upload(path, file, { upsert: true, contentType: file.type });
+  if (error) throw error;
+  return supabase.storage.from("progress-photos").getPublicUrl(path).data.publicUrl;
+}
 
 // ─── BMR & Macro Calculator ──────────────────────────────────
 function calcBMR(gender, weight, height, age) {
@@ -107,7 +145,14 @@ function useWindowWidth() {
 // getCLItems() เป็น function ไม่ใช่ constant
 // เพื่อให้ sync กับ profile ที่อัปเดตทันที ไม่ต้อง reload
 function getCLItems() { return buildCLItems(getProfile()); }
-const EX_TYPES = ["วิ่งกลางแจ้ง","เดิน","ขี่จักรยาน","ว่ายน้ำ","Weight Training","Leg Day","Push Day","Pull Day","Full Body","HIIT","Zone 2 Cardio","Yoga / Stretching","อื่นๆ"];
+const EX_GROUPS = [
+  { group: "Cardio กลางแจ้ง",      types: ["วิ่งกลางแจ้ง","เดินเร็วกลางแจ้ง","ปั่นจักรยานกลางแจ้ง","ว่ายน้ำ","กระโดดเชือก","เล่นกีฬา"] },
+  { group: "Cardio เครื่อง/ในร่ม", types: ["วิ่งลู่ (Treadmill)","เครื่องปั่นจักรยาน (Bike)","Elliptical","Rowing Machine","Stair Climber"] },
+  { group: "Weight Training",       types: ["Full Body","Upper Body","Lower Body","Push","Pull","Legs","Core/Abs"] },
+  { group: "Mind-Body/ยืดหยุ่น",   types: ["Yoga","Pilates","Stretching"] },
+  { group: "High Intensity",        types: ["HIIT","Crossfit","Circuit Training"] },
+  { group: "อื่นๆ",                 types: ["เดินทั่วไป","อื่นๆ"] },
+];
 const INJ_SITES = ["หน้าท้อง ซ้าย","หน้าท้อง ขวา","หน้าท้อง กลาง","ต้นขา ซ้าย","ต้นขา ขวา","ต้นแขน ซ้าย","ต้นแขน ขวา"];
 
 // ═══════════════════════════════════════════════════════════════
@@ -221,8 +266,8 @@ const SheetBtns = ({ onCancel, onConfirm, confirmLabel = "บันทึก" })
 );
 
 const Toggle = ({ value, onChange, label }) => (
-  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "13px 0", borderBottom: `1px solid ${T.borderLight}` }}>
-    <span style={{ fontSize: 14, color: T.text }}>{label}</span>
+  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${T.borderLight}` }}>
+    <span style={{ fontSize: 11, color: T.text }}>{label}</span>
     <div onClick={() => onChange(!value)} style={{ width: 42, height: 25, borderRadius: 13, background: value ? T.accent : T.border, position: "relative", cursor: "pointer", transition: "background 0.2s", flexShrink: 0 }}>
       <div style={{ position: "absolute", top: 3, left: value ? 19 : 3, width: 19, height: 19, borderRadius: "50%", background: "#fff", transition: "left 0.2s", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />
     </div>
@@ -357,9 +402,12 @@ const NAV = [
 ];
 const Sidebar = ({ active, onNav }) => (
   <div style={{ width: 210, minHeight: "100vh", background: T.surface, borderRight: `1px solid ${T.border}`, padding: "28px 14px", display: "flex", flexDirection: "column", position: "fixed", top: 0, left: 0, bottom: 0, zIndex: 100, boxSizing: "border-box" }}>
-    <div style={{ padding: "0 8px 28px" }}>
-      <div style={{ fontSize: 11, fontWeight: 700, color: T.accent, letterSpacing: "0.14em", textTransform: "uppercase" }}>VITALTRACK</div>
-      <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>Health Monitoring</div>
+    <div style={{ padding: "0 8px 28px", display: "flex", alignItems: "center", gap: 9 }}>
+      <img src="/apple-touch-icon.png" alt="logo" style={{ width: 32, height: 32, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />
+      <div style={{ lineHeight: 1.1 }}>
+        <span style={{ fontSize: 17, fontWeight: 700, color: "#2D5BE3" }}>Bodii</span>
+        <span style={{ fontSize: 17, fontWeight: 700, color: "#0E1726" }}> Now</span>
+      </div>
     </div>
     <nav style={{ flex: 1 }}>
       {NAV.map(item => {
@@ -429,6 +477,7 @@ function DailyPage({ currentDate, onSave }) {
   const [dayNote, setDayNote] = useState(saved.dayNote || "");
   const [photos, setPhotos] = useState(saved.photos || {});
 
+  const [savedToast, setSavedToast] = useState(false);
   const [foodSheet, setFoodSheet] = useState(false);
   const [curMealId, setCurMealId] = useState(null);
   const [foodForm, setFoodForm] = useState({ food: "", kcal: "", pro: "", carb: "", fat: "" });
@@ -439,10 +488,19 @@ function DailyPage({ currentDate, onSave }) {
   let mealIdRef = useRef(meals.length ? Math.max(...meals.map(m => m.id)) + 1 : 1);
   let exIdRef = useRef(exercises.length ? Math.max(...exercises.map(e => e.id)) + 1 : 1);
 
+  const isFirstRender = useRef(true);
   useEffect(() => {
     const data = { weight, waist, hip, thigh, bf, muscle, meals, exercises, water, steps, hunger, fullness, energy, stress, sleep, nausea, dizzy, pain, constipation, vomit, bm, symNote, checks, dayNote, photos };
     const db = getDB(); db[key] = data; setDB(db);
     onSave && onSave();
+    // Cloud sync (debounced 1.5s to avoid hammering on every keystroke)
+    if (_uid) debounceCloud(`day_${key}`, () => cloudSaveDay(_uid, key, data), 1500);
+    if (!isFirstRender.current) {
+      setSavedToast(true);
+      clearTimeout(window._saveToastTimer);
+      window._saveToastTimer = setTimeout(() => setSavedToast(false), 1500);
+    }
+    isFirstRender.current = false;
   }, [weight, waist, hip, thigh, bf, muscle, meals, exercises, water, steps, hunger, fullness, energy, stress, sleep, nausea, dizzy, pain, constipation, vomit, bm, symNote, checks, dayNote, photos]);
 
   const macros = meals.reduce((s, m) => {
@@ -466,7 +524,7 @@ function DailyPage({ currentDate, onSave }) {
   const removeFood = (mealId, idx) => setMeals(prev => prev.map(m => m.id === mealId ? { ...m, items: m.items.filter((_, i) => i !== idx) } : m));
   const removeMeal = (id) => setMeals(prev => prev.filter(m => m.id !== id));
 
-  const openExSheet = () => { setExForm({ type: "วิ่งกลางแจ้ง", detail: "", dur: "", kcal: "", rpe: "" }); setExSheet(true); };
+  const openExSheet = () => { setExForm({ type: EX_GROUPS[0].types[0], detail: "", dur: "", kcal: "", rpe: "" }); setExSheet(true); };
   const confirmEx = () => { setExercises(prev => [...prev, { id: exIdRef.current++, ...exForm }]); setExSheet(false); };
   const removeEx = (id) => setExercises(prev => prev.filter(e => e.id !== id));
 
@@ -474,8 +532,16 @@ function DailyPage({ currentDate, onSave }) {
   const addSteps = (n) => setSteps(v => Math.max(0, v + n));
   const toggleCheck = (key) => setChecks(prev => ({ ...prev, [key]: !prev[key] }));
 
-  const handlePhoto = (side, e) => {
+  const handlePhoto = async (side, e) => {
     const file = e.target.files[0]; if (!file) return;
+    if (_uid) {
+      try {
+        const url = await uploadPhoto(_uid, key, side, file);
+        setPhotos(prev => ({ ...prev, [side]: url }));
+        return;
+      } catch(err) { console.warn("Photo upload failed, using local fallback:", err.message); }
+    }
+    // Fallback: base64 (offline / no uid)
     const reader = new FileReader();
     reader.onload = ev => setPhotos(prev => ({ ...prev, [side]: ev.target.result }));
     reader.readAsDataURL(file);
@@ -493,6 +559,12 @@ function DailyPage({ currentDate, onSave }) {
 
   return (
     <div>
+      {/* Auto-save toast */}
+      {savedToast && (
+        <div style={{ position:"fixed", bottom:80, left:"50%", transform:"translateX(-50%)", background:"#1a1a2e", color:"#fff", fontSize:12, padding:"8px 18px", borderRadius:20, zIndex:9999, boxShadow:"0 4px 12px rgba(0,0,0,0.2)", pointerEvents:"none", opacity:0.9 }}>
+          ✓ บันทึกแล้ว
+        </div>
+      )}
       <div style={{ marginBottom: 20 }}>
         <h2 style={{ fontSize: 20, fontWeight: 700, color: T.text, margin: 0 }}>กรอกข้อมูล</h2>
         <p style={{ fontSize: 13, color: T.textSub, margin: "3px 0 0" }}>
@@ -696,7 +768,14 @@ function DailyPage({ currentDate, onSave }) {
       <Sheet open={exSheet} onClose={() => setExSheet(false)} title="เพิ่มการออกกำลังกาย">
         <FieldGroup>
           <FieldRow label="ประเภท">
-            <FieldSelect value={exForm.type} onChange={e => setExForm(p => ({ ...p, type: e.target.value }))} options={EX_TYPES} />
+            <select value={exForm.type} onChange={e => setExForm(p => ({ ...p, type: e.target.value }))}
+              style={{ border:"none", background:"none", fontFamily:"inherit", fontSize:14, color:T.text, outline:"none", padding:"12px 0", textAlign:"right", appearance:"none", WebkitAppearance:"none", cursor:"pointer", maxWidth:200 }}>
+              {EX_GROUPS.map(g => (
+                <optgroup key={g.group} label={g.group}>
+                  {g.types.map(t => <option key={t} value={t}>{t}</option>)}
+                </optgroup>
+              ))}
+            </select>
             <span style={{ fontSize: 12, color: T.textMuted }}>›</span>
           </FieldRow>
           <FieldRow label="รายละเอียด">
@@ -726,8 +805,8 @@ function ReviewPage() {
   const profile = getProfile();
   const goals = profile?.goals || {};
   const [period, setPeriod] = useState(7);
-  const [notes, setNotes] = useState(() => { try { return JSON.parse(localStorage.getItem(WEEKLY_STORE) || "{}"); } catch { return {}; } });
-  const saveNotes = (n) => { setNotes(n); localStorage.setItem(WEEKLY_STORE, JSON.stringify(n)); };
+  const [notes, setNotes] = useState(() => { try { return JSON.parse(localStorage.getItem(k(WEEKLY_STORE)) || "{}"); } catch { return {}; } });
+  const saveNotes = (n) => { setNotes(n); localStorage.setItem(k(WEEKLY_STORE), JSON.stringify(n)); if (_uid) debounceCloud("weekly", () => cloudSaveWeekly(_uid, n), 1500); };
 
   const getDays = (n) => {
     const result = [];
@@ -1064,8 +1143,9 @@ function InjPage() {
     const inj = { id: Date.now(), site, ...form };
     const updated = [inj, ...injections];
     setInjections(updated); setInj(updated); setSheet(false);
+    if (_uid) cloudSaveInj(_uid, updated);
   };
-  const removeInj = (id) => { const u = injections.filter(i => i.id !== id); setInjections(u); setInj(u); };
+  const removeInj = (id) => { const u = injections.filter(i => i.id !== id); setInjections(u); setInj(u); if (_uid) cloudSaveInj(_uid, u); };
 
   return (
     <div>
@@ -1108,8 +1188,8 @@ function InjPage() {
 // ═══════════════════════════════════════════════════════════════
 function WeeklyPage() {
   const db = getDB();
-  const [notes, setNotes] = useState(() => { try { return JSON.parse(localStorage.getItem(WEEKLY_STORE) || "{}"); } catch { return {}; } });
-  const saveNotes = (n) => { setNotes(n); localStorage.setItem(WEEKLY_STORE, JSON.stringify(n)); };
+  const [notes, setNotes] = useState(() => { try { return JSON.parse(localStorage.getItem(k(WEEKLY_STORE)) || "{}"); } catch { return {}; } });
+  const saveNotes = (n) => { setNotes(n); localStorage.setItem(k(WEEKLY_STORE), JSON.stringify(n)); if (_uid) debounceCloud("weekly", () => cloudSaveWeekly(_uid, n), 1500); };
 
   const getDays = (n) => { const r = []; for (let i = n - 1; i >= 0; i--) { const d = new Date(); d.setDate(d.getDate() - i); r.push({ key: dateKey(d), r: db[dateKey(d)] || null }); } return r; };
   const days = getDays(7);
@@ -1230,7 +1310,7 @@ function DataPage() {
         <SectionTitle sub={`${keys.length} วันที่บันทึก`}>Data & Export</SectionTitle>
         <div style={{ display:"flex", gap:8 }}>
           <button onClick={exportExcel} style={{ padding:"9px 18px", border:`1px solid ${T.green}`, background:T.greenSoft, color:T.green, borderRadius:T.radiusSm, fontSize:13, fontWeight:600, cursor:"pointer" }}>↓ Export Excel (5WP)</button>
-          <button onClick={()=>{ if(confirm("ลบข้อมูลทั้งหมด?")&&confirm("ยืนยัน — ข้อมูลจะหายถาวร")){localStorage.removeItem(STORE);localStorage.removeItem(INJ_STORE);localStorage.removeItem(WEEKLY_STORE);window.location.reload();}}} style={{ padding:"9px 18px", border:`1px solid ${T.border}`, background:T.surface, color:T.textMuted, borderRadius:T.radiusSm, fontSize:13, cursor:"pointer" }}>✕ Clear</button>
+          <button onClick={()=>{ if(confirm("ลบข้อมูลทั้งหมด?")&&confirm("ยืนยัน — ข้อมูลจะหายถาวร")){localStorage.removeItem(k(STORE));localStorage.removeItem(k(INJ_STORE));localStorage.removeItem(k(WEEKLY_STORE));window.location.reload();}}} style={{ padding:"9px 18px", border:`1px solid ${T.border}`, background:T.surface, color:T.textMuted, borderRadius:T.radiusSm, fontSize:13, cursor:"pointer" }}>✕ Clear</button>
         </div>
       </div>
       <Card style={{ overflowX:"auto" }}>
@@ -1375,6 +1455,7 @@ function ProfilePage({ onSaved }) {
       },
     };
     setProfile(profile);
+    if (_uid) cloudSaveProfile(_uid, profile);
     setSavedOk(true);
     onSaved && onSaved();
     setTimeout(() => setSavedOk(false), 2000);
@@ -1639,15 +1720,23 @@ function ProfilePage({ onSaved }) {
 
 // ═══ APP ROOT ════════════════════════════════════════════════
 export default function App({ userId = "", userEmail = "", onLogout }) {
-  // ── Set user scope for all storage helpers ────────────────────
-  useEffect(() => { setCurrentUser(userId); }, [userId]);
-
+  const [syncing, setSyncing] = useState(true);
   const [page, setPage] = useState("daily");
   const [currentDate, setCurrentDate] = useState(new Date());
   const [, forceUpdate] = useState(0);
   const width = useWindowWidth();
   const isMobile = width < 768;
   const SIDEBAR_W = 210;
+
+  useEffect(() => {
+    setCurrentUser(userId);
+    if (userId) {
+      cloudPullAll(userId).finally(() => setSyncing(false));
+    } else {
+      setSyncing(false);
+    }
+  }, [userId]);
+
   const changeDate = (n) => { const d = new Date(currentDate); d.setDate(d.getDate() + n); setCurrentDate(d); };
 
   const pageMap = {
@@ -1657,6 +1746,15 @@ export default function App({ userId = "", userEmail = "", onLogout }) {
     data:    <DataPage />,
     profile: <ProfilePage onSaved={() => forceUpdate(x => x + 1)} />,
   };
+
+  if (syncing) {
+    return (
+      <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", minHeight:"100vh", gap:14, background:T.bg, fontFamily:"-apple-system,'SF Pro Display','Helvetica Neue',sans-serif" }}>
+        <img src="/apple-touch-icon.png" alt="Bodii Now" style={{ width:60, height:60, borderRadius:14, opacity:0.9 }} />
+        <div style={{ fontSize:13, color:T.textMuted }}>กำลังโหลดข้อมูล...</div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ fontFamily:"-apple-system,'SF Pro Display','Helvetica Neue',sans-serif", background:T.bg, minHeight:"100vh", WebkitFontSmoothing:"antialiased" }}>
@@ -1673,8 +1771,13 @@ export default function App({ userId = "", userEmail = "", onLogout }) {
       {!isMobile && <Sidebar active={page} onNav={setPage} />}
 
       <div style={{ position:"fixed", top:0, left:isMobile?0:SIDEBAR_W, right:0, zIndex:90, background:"rgba(250,250,248,0.92)", backdropFilter:"blur(12px)", WebkitBackdropFilter:"blur(12px)", borderBottom:`1px solid ${T.border}`, height:48, display:"flex", alignItems:"center", justifyContent:isMobile?"space-between":"flex-end", padding:"0 20px", gap:10 }}>
-        {isMobile && <div style={{ fontSize:11, fontWeight:700, color:T.accent, letterSpacing:"0.12em", textTransform:"uppercase" }}>VITALTRACK</div>}
-        {/* User info + Logout */}
+        {isMobile && (
+          <div style={{ display:"flex", alignItems:"center", gap:7 }}>
+            <img src="/apple-touch-icon.png" alt="logo" style={{ width:26, height:26, borderRadius:6, objectFit:"cover" }} />
+            <span style={{ fontSize:16, fontWeight:700, color:"#2D5BE3", lineHeight:1 }}>Bodii</span>
+            <span style={{ fontSize:16, fontWeight:700, color:"#0E1726", lineHeight:1 }}>Now</span>
+          </div>
+        )}
         {userEmail && (
           <div style={{ display:"flex", alignItems:"center", gap:8, marginRight:"auto" }}>
             <span style={{ fontSize:11, color:T.textMuted, maxWidth:140, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{userEmail}</span>
